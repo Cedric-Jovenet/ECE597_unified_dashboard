@@ -731,4 +731,4 @@ with tab_definitions:
     st.markdown("### NOIZEUS")
     st.markdown("NOIZEUS is a speech corpus with noisy recordings at multiple SNR levels, commonly used to benchmark speech enhancement algorithms. It contains clean references and several real-world noise conditions.")
     st.markdown("**References:** [NOIZEUS dataset information](https://www.utdallas.edu/~loizou/speech/noizeus/) ")
-    st.markdown("**Personal comments:** Add your notes here. ")
+    st.markdown("**Personal comments:** Add your notes here.")
