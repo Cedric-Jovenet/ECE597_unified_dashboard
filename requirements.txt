@@ -1,0 +1,8 @@
+streamlit==1.32.0
+numpy
+scipy
+librosa
+matplotlib
+soundfile
+pesq
+pystoi
