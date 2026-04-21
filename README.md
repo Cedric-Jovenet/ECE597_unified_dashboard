@@ -38,6 +38,8 @@ pip install -r requirements.txt
 Run locally with:
 ```
 streamlit run app.py
+
+(Start the app from the parent folder of app.py (\research_audio_project))
 ```
 
 ## Datasets

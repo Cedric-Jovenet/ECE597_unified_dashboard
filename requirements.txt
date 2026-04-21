@@ -6,3 +6,4 @@ matplotlib
 soundfile
 pesq
 pystoi
+PyMuPDF

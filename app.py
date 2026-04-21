@@ -6,8 +6,11 @@ import matplotlib.pyplot as plt
 import soundfile as sf
 import inspect
 import os
+import shutil
+import io
 from pesq import pesq
 import pystoi
+import fitz
 
 # Import algorithms
 from src.algorithms.spectral import spectral_subtraction, spectral_subtraction_oversubtraction, multiband_spectral_subtraction
@@ -34,7 +37,7 @@ def get_noizeus_samples():
             noise_name = parts[0]
             snr = parts[1]
 
-            # Compter les fichiers disponibles
+            # Count available files
             noise_path = os.path.join(base_path, noise_type)
             if os.path.exists(noise_path):
                 wav_files = [f for f in os.listdir(noise_path) if f.endswith('.wav')]
@@ -75,6 +78,39 @@ def load_noizeus_sample(noise_type, sample_idx=1):
 
     return y_noisy, y_clean, sr_noisy
 
+def ensure_static_pdf(pdf_source_path, static_pdf_filename):
+    """Expose a PDF through Streamlit's static folder and return its served URL."""
+    if not os.path.exists(pdf_source_path):
+        return None
+
+    static_pdf_path = os.path.join("static", static_pdf_filename)
+    static_pdf_url = f"/app/static/{static_pdf_filename}"
+
+    if not os.path.exists(static_pdf_path):
+        shutil.copyfile(pdf_source_path, static_pdf_path)
+
+    return static_pdf_url
+
+def render_pdf_preview(pdf_source_path, max_pages=3, zoom=1.5):
+    """Render the first pages of a PDF as images to avoid browser PDF iframe issues."""
+    if not os.path.exists(pdf_source_path):
+        return False
+
+    document = fitz.open(pdf_source_path)
+    try:
+        page_count = min(max_pages, len(document))
+        matrix = fitz.Matrix(zoom, zoom)
+
+        for page_index in range(page_count):
+            page = document.load_page(page_index)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            page_image = io.BytesIO(pixmap.tobytes("png"))
+            st.image(page_image, caption=f"PDF preview - page {page_index + 1}", use_column_width=True)
+    finally:
+        document.close()
+
+    return True
+
 def calculate_metrics(y_original, y_clean, y_enhanced, sr):
     """Compute objective metrics."""
     metrics = {}
@@ -105,7 +141,7 @@ def calculate_metrics(y_original, y_clean, y_enhanced, sr):
 
     metrics['snr_improvement'] = snr_output - snr_input
 
-    # PESQ (si possible)
+    # PESQ (if available)
     try:
         # Resample to 16kHz for PESQ
         if sr != 16000:
@@ -115,7 +151,7 @@ def calculate_metrics(y_original, y_clean, y_enhanced, sr):
             y_clean_16k = y_clean
             y_enhanced_16k = y_enhanced
 
-        # Normaliser
+        # Normalize
         y_clean_16k = y_clean_16k / np.max(np.abs(y_clean_16k)) if np.max(np.abs(y_clean_16k)) > 0 else y_clean_16k
         y_enhanced_16k = y_enhanced_16k / np.max(np.abs(y_enhanced_16k)) if np.max(np.abs(y_enhanced_16k)) > 0 else y_enhanced_16k
 
@@ -254,8 +290,20 @@ with tab_dataset:
 
     if noizeus_samples:
         st.markdown("""
-        The **NOIZEUS** corpus contains 30 IEEE sentences recorded by multiple speakers,
-        corrupted by 8 real-world noises at several SNR levels (0dB, 5dB, 10dB, 15dB).
+        The **NOIZEUS** corpus is a benchmark dataset for single-channel speech enhancement.
+
+        **Detailed composition (as used in this project):**
+        - 30 clean IEEE sentences (`sp01.wav` to `sp30.wav`)
+        - 8 real-world noise environments: airport, babble, car, exhibition, restaurant, station, street, train
+        - 4 SNR levels per noise: 0 dB, 5 dB, 10 dB, 15 dB
+        - 30 noisy files per condition, aligned with clean references
+        - File naming convention: `spXX_<noise>_sn<snr>.wav` (example: `sp01_airport_sn0.wav`)
+
+        This creates a controlled testbed to compare algorithms under identical speech content
+        with progressively different noise difficulty.
+
+        **Reference link (official source):**
+        http://ecs.utdallas.edu/loizou/speech/noizeus/
         """)
 
         # General statistics
@@ -513,7 +561,6 @@ with tab_demo:
 
 with tab_analysis:
     st.header("📊 Advanced Analysis & Metrics")
-    st.markdown("[PESQ](#pesq) | [STOI](#stoi) | [SNR](#snr) | [Spectral Subtraction](#spectral-subtraction) | [Subspace Enhancement](#subspace-enhancement) | [ANC](#anc) | [NOIZEUS](#noizeus)")
 
     if not noizeus_samples:
         st.error("NOIZEUS dataset required for advanced analysis")
@@ -541,7 +588,7 @@ with tab_analysis:
             key="analysis_snr"
         )
 
-    # Trouver le sample correspondant
+    # Find the matching sample
     selected_analysis_sample = None
     for s in noizeus_samples:
         if s['noise_name'] == analysis_noise and s['snr'] == analysis_snr:
@@ -691,35 +738,94 @@ with tab_definitions:
     st.markdown("### Quick term links")
     st.markdown("[PESQ](#pesq) | [STOI](#stoi) | [SNR](#snr) | [Spectral Subtraction](#spectral-subtraction) | [Subspace Enhancement](#subspace-enhancement) | [ANC](#anc) | [NOIZEUS](#noizeus)")
 
+    speech_enhancement_book_pdf_source = os.path.join(
+        "assets",
+        "pdf",
+        "references",
+        "Loizou, Philipos C. - Speech Enhancement _ Theory and Practice (2013, CRC Press) - libgen.li.pdf"
+    )
+    speech_enhancement_book_pdf_url = ensure_static_pdf(
+        speech_enhancement_book_pdf_source,
+        "speech_enhancement_reference.pdf"
+    )
+    spectral_subtraction_presentation_pdf_source = os.path.join(
+        "assets",
+        "pdf",
+        "presentations",
+        "specsub1.pdf"
+    )
+    spectral_subtraction_presentation_pdf_url = ensure_static_pdf(
+        spectral_subtraction_presentation_pdf_source,
+        "spectral_subtraction_presentation.pdf"
+    )
+
+
+
     st.markdown("<a id='pesq'></a>", unsafe_allow_html=True)
     st.markdown("### PESQ")
     st.markdown("PESQ (Perceptual Evaluation of Speech Quality) is an objective metric that estimates perceived speech quality on a scale typically between 1.0 and 4.5. It is widely used to evaluate speech enhancement algorithms.")
-    st.markdown("**References:** [ITU-T P.862](https://www.itu.int/rec/T-REC-P.862/en)")
-    st.markdown("**Personal comments:** Add your notes here.")
+    st.markdown("**References:** [ITU-T P.862](https://www.itu.int/rec/T-REC-P.862/en); [GitHub repository of the Python library](https://github.com/ludlows/PESQ/tree/v0.0.4)")
+    st.markdown("**Personal comments:** In this project, PESQ is calculated using the `pesq` Python package, which implements the ITU-T standard. The [GitHub repository](https://github.com/ludlows/PESQ/tree/v0.0.4) provides the implementation used." \
+    " The PESQ score is basically calculated using a mathematical model that simulates human hearing to compare the reference and degraded signals and return a standardized perceptual quality score.")
 
     st.markdown("<a id='stoi'></a>", unsafe_allow_html=True)
     st.markdown("### STOI")
     st.markdown("STOI (Short-Time Objective Intelligibility) estimates speech intelligibility by comparing clean and processed signals. It ranges from 0 to 1, with higher values indicating better intelligibility.")
-    st.markdown("**References:** [Taal et al. 2011](https://ieeexplore.ieee.org/document/5749941)")
-    st.markdown("**Personal comments:** Add your notes here.")
+    st.markdown("""
+    **References:**
+    1. C. H. Taal, R. C. Hendriks, R. Heusdens, J. Jensen, *A Short-Time Objective Intelligibility Measure for Time-Frequency Weighted Noisy Speech*, ICASSP 2010. [DOI:10.1109/ICASSP.2010.5495701](https://doi.org/10.1109/ICASSP.2010.5495701)
+    2. C. H. Taal, R. C. Hendriks, R. Heusdens, J. Jensen, *An Algorithm for Intelligibility Prediction of Time-Frequency Weighted Noisy Speech*, IEEE Transactions on Audio, Speech, and Language Processing, 2011. [DOI:10.1109/TASL.2011.2114881](https://doi.org/10.1109/TASL.2011.2114881)
+    3. J. Jensen, C. H. Taal, *An Algorithm for Predicting the Intelligibility of Speech Masked by Modulated Noise Maskers*, IEEE/ACM Transactions on Audio, Speech, and Language Processing, 2016. [DOI:10.1109/TASLP.2016.2585878](https://doi.org/10.1109/TASLP.2016.2585878)
+    """)
+    st.markdown("**Personal comments:** In this project, STOI is calculated using the `pystoi` Python package, which provides an objective measure of speech intelligibility.")
 
     st.markdown("<a id='snr'></a>", unsafe_allow_html=True)
     st.markdown("### SNR")
     st.markdown("SNR (Signal-to-Noise Ratio) measures the ratio between clean signal power and noise power. It is often reported in decibels (dB) and is a primary objective measure for noise reduction performance.")
-    st.markdown("**References:** [Van Trees, Detection, Estimation, and Modulation Theory](https://www.wiley.com/en-us/Detection%2C+Estimation%2C+and+Modulation+Theory%2C+Part+I-p-9780470547977)")
-    st.markdown("**Personal comments:** Add your notes here.")
+    st.markdown(r"**Equation:** $\mathrm{SNR}_{\mathrm{dB}} = 10\log_{10}\left(\frac{P_{\mathrm{signal}}}{P_{\mathrm{noise}}}\right)$")
+    st.markdown(r"For discrete-time signals: $\mathrm{SNR}_{\mathrm{dB}} = 10\log_{10}\left(\frac{\sum_n s[n]^2}{\sum_n (x[n]-s[n])^2}\right)$, where $x[n]$ is noisy speech and $s[n]$ is clean speech.")
+    st.markdown("**References:** [SNR on wikipedia](https://en.wikipedia.org/wiki/Signal-to-noise_ratio)")
+    st.markdown("**Personal comments:** ")
 
     st.markdown("<a id='spectral-subtraction'></a>", unsafe_allow_html=True)
     st.markdown("### Spectral Subtraction")
     st.markdown("Spectral subtraction is a classic speech enhancement technique that estimates noise from non-speech segments and subtracts it from the noisy speech spectrum. Variants include over-subtraction and multi-band subtraction.")
     st.markdown("**References:** [Boll, 1979](https://ieeexplore.ieee.org/document/1163209)")
-    st.markdown("**Personal comments:** Add your notes here.")
+    if speech_enhancement_book_pdf_url:
+        st.markdown(
+            f'**Download:** <a href="{speech_enhancement_book_pdf_url}" download="loizou2013.pdf">Loizou 2013 (PDF)</a>',
+            unsafe_allow_html=True
+        )
+
+    else:
+        st.warning("Speech enhancement reference PDF not found in assets/pdf/references/.")
+    st.markdown("**Personal comments:**")
+
+    if spectral_subtraction_presentation_pdf_url:
+        st.markdown(
+            f'Presentation PDF: <a href="{spectral_subtraction_presentation_pdf_url}" download="spectral_subtraction_presentation.pdf">Download</a>',
+            unsafe_allow_html=True
+        )
+
+        if st.checkbox("Show PDF preview (Spectral Subtraction)", key="preview_spectral_subtraction_pdf"):
+            if not render_pdf_preview(spectral_subtraction_presentation_pdf_source):
+                st.warning("Unable to generate the Spectral Subtraction PDF preview.")
+    else:
+        st.info("The Spectral Subtraction presentation PDF was not found in assets/pdf/presentations/.")
 
     st.markdown("<a id='subspace-enhancement'></a>", unsafe_allow_html=True)
     st.markdown("### Subspace Enhancement")
     st.markdown("Subspace enhancement uses matrix decompositions to separate speech and noise subspaces. The algorithm then reconstructs the signal from the estimated speech subspace, improving noise suppression.")
-    st.markdown("**References:** [Huang and Huang, 2001](https://ieeexplore.ieee.org/document/969612)")
-    st.markdown("**Personal comments:** Add your notes here.")
+    st.markdown("**References:** ")
+    if speech_enhancement_book_pdf_url:
+        st.markdown(
+            f'**Download:** <a href="{speech_enhancement_book_pdf_url}" download="loizou2013.pdf">Loizou 2013 (PDF)</a>',
+            unsafe_allow_html=True
+        )
+
+    else:
+        st.warning("Speech enhancement reference PDF not found in assets/pdf/references/.")
+    st.markdown("**Personal comments:**")
 
     st.markdown("<a id='anc'></a>", unsafe_allow_html=True)
     st.markdown("### ANC")
@@ -730,5 +836,5 @@ with tab_definitions:
     st.markdown("<a id='noizeus'></a>", unsafe_allow_html=True)
     st.markdown("### NOIZEUS")
     st.markdown("NOIZEUS is a speech corpus with noisy recordings at multiple SNR levels, commonly used to benchmark speech enhancement algorithms. It contains clean references and several real-world noise conditions.")
-    st.markdown("**References:** [NOIZEUS dataset information](https://www.utdallas.edu/~loizou/speech/noizeus/) ")
-    st.markdown("**Personal comments:** Add your notes here.")
+    st.markdown("**References:** [NOIZEUS dataset information](https://ecs.utdallas.edu/loizou/speech/noizeus/) ")
+    st.markdown("**Personal comments:** See the dataset tab for more details on the NOIZEUS corpus, including its structure.")
