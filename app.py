@@ -738,16 +738,6 @@ with tab_definitions:
     st.markdown("### Quick term links")
     st.markdown("[PESQ](#pesq) | [STOI](#stoi) | [SNR](#snr) | [Spectral Subtraction](#spectral-subtraction) | [Subspace Enhancement](#subspace-enhancement) | [ANC](#anc) | [NOIZEUS](#noizeus)")
 
-    speech_enhancement_book_pdf_source = os.path.join(
-        "assets",
-        "pdf",
-        "references",
-        "Loizou, Philipos C. - Speech Enhancement _ Theory and Practice (2013, CRC Press) - libgen.li.pdf"
-    )
-    speech_enhancement_book_pdf_url = ensure_static_pdf(
-        speech_enhancement_book_pdf_source,
-        "speech_enhancement_reference.pdf"
-    )
     spectral_subtraction_presentation_pdf_source = os.path.join(
         "assets",
         "pdf",
@@ -790,15 +780,7 @@ with tab_definitions:
     st.markdown("<a id='spectral-subtraction'></a>", unsafe_allow_html=True)
     st.markdown("### Spectral Subtraction")
     st.markdown("Spectral subtraction is a classic speech enhancement technique that estimates noise from non-speech segments and subtracts it from the noisy speech spectrum. Variants include over-subtraction and multi-band subtraction.")
-    st.markdown("**References:** [Boll, 1979](https://ieeexplore.ieee.org/document/1163209)")
-    if speech_enhancement_book_pdf_url:
-        st.markdown(
-            f'**Download:** <a href="{speech_enhancement_book_pdf_url}" download="loizou2013.pdf">Loizou 2013 (PDF)</a>',
-            unsafe_allow_html=True
-        )
-
-    else:
-        st.warning("Speech enhancement reference PDF not found in assets/pdf/references/.")
+    st.markdown("**References:** [Boll, 1979](https://ieeexplore.ieee.org/document/1163209); P. C. Loizou, *Speech Enhancement: Theory and Practice*, 2nd ed., CRC Press, 2013.")
     st.markdown("**Personal comments:**")
 
     if spectral_subtraction_presentation_pdf_url:
@@ -816,15 +798,7 @@ with tab_definitions:
     st.markdown("<a id='subspace-enhancement'></a>", unsafe_allow_html=True)
     st.markdown("### Subspace Enhancement")
     st.markdown("Subspace enhancement uses matrix decompositions to separate speech and noise subspaces. The algorithm then reconstructs the signal from the estimated speech subspace, improving noise suppression.")
-    st.markdown("**References:** ")
-    if speech_enhancement_book_pdf_url:
-        st.markdown(
-            f'**Download:** <a href="{speech_enhancement_book_pdf_url}" download="loizou2013.pdf">Loizou 2013 (PDF)</a>',
-            unsafe_allow_html=True
-        )
-
-    else:
-        st.warning("Speech enhancement reference PDF not found in assets/pdf/references/.")
+    st.markdown("**References:** [Huang and Huang, 2001](https://ieeexplore.ieee.org/document/969612); P. C. Loizou, *Speech Enhancement: Theory and Practice*, 2nd ed., CRC Press, 2013.")
     st.markdown("**Personal comments:**")
 
     st.markdown("<a id='anc'></a>", unsafe_allow_html=True)
