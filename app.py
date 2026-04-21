@@ -573,11 +573,12 @@ with tab_analysis:
 
     # Analysis parameter selection
     col_sel1, col_sel2 = st.columns(2)
+    available_analysis_noises = sorted({sample['noise_name'] for sample in noizeus_samples})
 
     with col_sel1:
         analysis_noise = st.selectbox(
             "Noise type for analysis",
-            [s['noise_name'] for s in noizeus_samples[:8]],
+            available_analysis_noises,
             key="analysis_noise"
         )
 
