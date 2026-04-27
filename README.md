@@ -1,5 +1,5 @@
 ---
-title: ECE597 Unified Dashboard
+title: Unified Speech Enhancement Dashboard
 emoji: 🎵
 colorFrom: blue
 colorTo: green
@@ -9,24 +9,25 @@ app_file: app.py
 pinned: false
 ---
 
-# ECE597 Unified Dashboard
+# Unified Speech Enhancement Dashboard
 
-A unified dashboard for audio research algorithms, featuring LMS, Spectral, and Subspace methods for noise reduction.
+A unified dashboard for classical speech enhancement research, centered on interpretable algorithms, the NOIZEUS dataset, and reproducible benchmarking.
 
 ## Features
 
-- Interactive audio processing with multiple algorithms
-- Real-time evaluation metrics (PESQ, STOI)
-- Sample audio datasets from NOIZEUS
-- Streamlit-based web interface
+- Interactive single-sample listening and visualization workspace
+- Classical implemented families: spectral subtraction, Wiener filtering, statistical model-based enhancement, and subspace enhancement
+- Reusable noise-estimation backends: stationary, minimum statistics, MCRA, and IMCRA
+- Reproducible benchmark workflow for NOIZEUS
+- Literature-oriented dataset, metric, and protocol notes in the same interface
 
 ## Usage
 
-Upload your audio files or use the provided samples to test different noise reduction algorithms.
+Use the NOIZEUS samples shipped with the project to inspect algorithm behavior on individual utterances, then move to the benchmark page to run comparable evaluations.
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - Streamlit
 - NumPy, SciPy, Librosa, Matplotlib, Soundfile, PESQ, PySTOI
 
@@ -42,9 +43,16 @@ streamlit run app.py
 (Start the app from the parent folder of app.py (\research_audio_project))
 ```
 
+Run the offline benchmark helper with:
+```bash
+python -m src.evaluation.noizeus_benchmark --noise babble --snr 5dB --output-dir artifacts
+```
+
+This command writes raw and summary CSV files that can be reused in the written report.
+
 ## Datasets
 
-This project uses the NOIZEUS dataset for evaluation, containing various noise types at different SNR levels.
+This project uses the NOIZEUS dataset for the runnable benchmark and tracks VoiceBank+DEMAND as a reference protocol in the literature section.
 
 ## License
 

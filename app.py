@@ -3,18 +3,24 @@ import numpy as np
 import librosa
 import librosa.display
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import soundfile as sf
 import inspect
 import os
 import shutil
 import io
+import pandas as pd
 from pesq import pesq
 import pystoi
 import fitz
 
-# Import algorithms
-from src.algorithms.spectral import spectral_subtraction, spectral_subtraction_oversubtraction, multiband_spectral_subtraction
-from src.algorithms.subspace import subspace_enhance
+from src.catalogs import (
+    get_algorithm_catalog,
+    get_benchmark_catalog,
+    get_dataset_catalog,
+    get_knowledge_topics,
+    get_reference_study_catalog,
+)
 
 # --- UTILITY FUNCTIONS FOR NOIZEUS ---
 def get_noizeus_samples():
@@ -121,7 +127,7 @@ def calculate_metrics(y_original, y_clean, y_enhanced, sr):
     y_clean = y_clean[:min_length]
     y_enhanced = y_enhanced[:min_length]
 
-    # SNR before / afterter
+    # SNR before / after
     def calculate_snr(signal, noise):
         if len(signal) == 0 or len(noise) == 0:
             return 0.0
@@ -130,6 +136,27 @@ def calculate_metrics(y_original, y_clean, y_enhanced, sr):
         if noise_power == 0:
             return float('inf') if signal_power > 0 else 0.0
         return 10 * np.log10(signal_power / noise_power)
+
+    def calculate_segmental_snr(clean_signal, noisy_signal, frame_len, hop_len):
+        """Compute segmental SNR averaged across short frames."""
+        if frame_len <= 0 or hop_len <= 0 or len(clean_signal) < frame_len or len(noisy_signal) < frame_len:
+            return 0.0
+
+        snr_frames = []
+        for start in range(0, len(clean_signal) - frame_len + 1, hop_len):
+            clean_frame = clean_signal[start:start + frame_len]
+            noisy_frame = noisy_signal[start:start + frame_len]
+            noise_frame = noisy_frame - clean_frame
+
+            clean_energy = np.sum(clean_frame ** 2)
+            noise_energy = np.sum(noise_frame ** 2)
+            frame_snr = 10 * np.log10((clean_energy + 1e-12) / (noise_energy + 1e-12))
+            # Standard clipping often used in SSNR reporting.
+            snr_frames.append(np.clip(frame_snr, -10.0, 35.0))
+
+        if not snr_frames:
+            return 0.0
+        return float(np.mean(snr_frames))
 
     # Noisy signal SNR
     noise = y_original - y_clean
@@ -141,21 +168,35 @@ def calculate_metrics(y_original, y_clean, y_enhanced, sr):
 
     metrics['snr_improvement'] = snr_output - snr_input
 
+    # Segmental SNR improvement (20 ms frames, 50% overlap)
+    frame_len = max(1, int(0.02 * sr))
+    hop_len = max(1, frame_len // 2)
+    seg_snr_input = calculate_segmental_snr(y_clean, y_original, frame_len, hop_len)
+    seg_snr_output = calculate_segmental_snr(y_clean, y_enhanced, frame_len, hop_len)
+    metrics['seg_snr_improvement'] = seg_snr_output - seg_snr_input
+
     # PESQ (if available)
     try:
-        # Resample to 16kHz for PESQ
-        if sr != 16000:
-            y_clean_16k = librosa.resample(y_clean, orig_sr=sr, target_sr=16000)
-            y_enhanced_16k = librosa.resample(y_enhanced, orig_sr=sr, target_sr=16000)
+        if sr == 8000:
+            pesq_sr = 8000
+            pesq_mode = 'nb'
+            y_clean_pesq = y_clean
+            y_enhanced_pesq = y_enhanced
         else:
-            y_clean_16k = y_clean
-            y_enhanced_16k = y_enhanced
+            pesq_sr = 16000
+            pesq_mode = 'wb'
+            if sr != 16000:
+                y_clean_pesq = librosa.resample(y_clean, orig_sr=sr, target_sr=16000)
+                y_enhanced_pesq = librosa.resample(y_enhanced, orig_sr=sr, target_sr=16000)
+            else:
+                y_clean_pesq = y_clean
+                y_enhanced_pesq = y_enhanced
 
         # Normalize
-        y_clean_16k = y_clean_16k / np.max(np.abs(y_clean_16k)) if np.max(np.abs(y_clean_16k)) > 0 else y_clean_16k
-        y_enhanced_16k = y_enhanced_16k / np.max(np.abs(y_enhanced_16k)) if np.max(np.abs(y_enhanced_16k)) > 0 else y_enhanced_16k
+        y_clean_pesq = y_clean_pesq / np.max(np.abs(y_clean_pesq)) if np.max(np.abs(y_clean_pesq)) > 0 else y_clean_pesq
+        y_enhanced_pesq = y_enhanced_pesq / np.max(np.abs(y_enhanced_pesq)) if np.max(np.abs(y_enhanced_pesq)) > 0 else y_enhanced_pesq
 
-        pesq_score = pesq(16000, y_clean_16k, y_enhanced_16k, 'wb')
+        pesq_score = pesq(pesq_sr, y_clean_pesq, y_enhanced_pesq, pesq_mode)
         metrics['pesq'] = pesq_score
     except Exception as e:
         metrics['pesq'] = None
@@ -231,117 +272,423 @@ def plot_signal_analysis(y_noisy, y_clean, y_enhanced, sr, title="Signal Analysi
     plt.tight_layout()
     return fig
 
+def render_markdown_list(items):
+    """Render simple bullet lists from a Python list."""
+    for item in items:
+        st.markdown(f"- {item}")
+
+
+FAMILY_COLORS = {
+    "Spectral Subtraction": "#93c5fd",
+    "Wiener Filtering": "#fca5a5",
+    "Statistical Model-Based Enhancement": "#86efac",
+    "Subspace Enhancement": "#fcd34d",
+}
+
+
+def get_family_segments(labels, family_lookup):
+    """Return contiguous family spans for the ordered algorithm labels."""
+    if not labels:
+        return []
+
+    segments = []
+    start_index = 1
+    current_family = family_lookup[labels[0]]
+
+    for index, label in enumerate(labels, start=1):
+        family = family_lookup[label]
+        if family != current_family:
+            segments.append((current_family, start_index, index - 1))
+            start_index = index
+            current_family = family
+
+    segments.append((current_family, start_index, len(labels)))
+    return segments
+
+
+def style_benchmark_axis(axis, labels, family_lookup, boxplot_artists=None):
+    """Rotate labels vertically and visually delimit algorithm families."""
+    if not labels:
+        return
+
+    if boxplot_artists is not None:
+        for index, box in enumerate(boxplot_artists['boxes']):
+            family = family_lookup[labels[index]]
+            box.set_facecolor(FAMILY_COLORS.get(family, "#d1d5db"))
+            box.set_edgecolor("#4b5563")
+            box.set_alpha(0.6)
+
+        for median in boxplot_artists['medians']:
+            median.set_color("#111827")
+            median.set_linewidth(1.5)
+
+    for family, start, end in get_family_segments(labels, family_lookup):
+        family_color = FAMILY_COLORS.get(family, "#d1d5db")
+        axis.axvspan(start - 0.5, end + 0.5, color=family_color, alpha=0.08, zorder=0)
+        if end < len(labels):
+            axis.axvline(end + 0.5, color="#6b7280", linestyle="--", linewidth=1, alpha=0.8)
+
+    axis.set_xlim(0.5, len(labels) + 0.5)
+    axis.set_xticks(range(1, len(labels) + 1))
+    axis.set_xticklabels(labels, rotation=90, ha="center", va="top", fontsize=8)
+    axis.tick_params(axis='x', pad=6)
+    axis.set_xlabel("Algorithms grouped by family", labelpad=12)
+
+
+def add_family_legend(fig, labels, family_lookup):
+    """Add a shared family legend for the benchmark figure."""
+    ordered_families = []
+    for label in labels:
+        family = family_lookup[label]
+        if family not in ordered_families:
+            ordered_families.append(family)
+
+    handles = [
+        Patch(
+            facecolor=FAMILY_COLORS.get(family, "#d1d5db"),
+            edgecolor="#4b5563",
+            alpha=0.6,
+            label=family,
+        )
+        for family in ordered_families
+    ]
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.03), ncol=min(4, len(handles)), frameon=False)
+
+def run_algorithm(algorithm_meta, y_noisy, sr):
+    """Execute an algorithm based on the catalog metadata."""
+    if not algorithm_meta['implemented'] or algorithm_meta['runner'] is None:
+        return None
+
+    if algorithm_meta['needs_sr']:
+        return algorithm_meta['runner'](y_noisy, sr)
+
+    return algorithm_meta['runner'](y_noisy)
+
+
+def format_protocol_for_table(protocol):
+    """Flatten protocol metadata for dataframe display."""
+    return {
+        'Sample rate': protocol['sample_rate'],
+        'Subset': protocol['subset'],
+        'SNR levels': ", ".join(protocol['snr_levels']) if protocol['snr_levels'] else "Not recorded",
+        'Metrics': ", ".join(protocol['metrics']) if protocol['metrics'] else "Not recorded",
+        'Preprocessing': protocol['preprocessing'],
+    }
+
 st.set_page_config(page_title="Speech Enhancement Research", layout="wide")
 
-st.title("🎙️ Speech Enhancement & ANC Dashboard")
-st.markdown("This dashboard presents the algorithms tested in my research project (ECE597 2025-2026). - Cédric JOVENET")
+st.title("🎙️ Unified Speech Enhancement Research Dashboard")
+st.markdown("This app presents classical speech enhancement algorithms, datasets, benchmark results, and literature notes in one place so the project stays rigorous, comparable, and easy to demonstrate. - Cédric JOVENET")
 
-# --- SIDEBAR: Data and algorithm selection ---
-st.sidebar.header("Configuration")
-
-# Retrieve available NOIZEUS samples
 noizeus_samples = get_noizeus_samples()
+algorithm_catalog = get_algorithm_catalog()
+dataset_catalog = get_dataset_catalog(noizeus_samples)
+benchmark_catalog = get_benchmark_catalog()
+knowledge_topics = get_knowledge_topics()
+reference_studies = get_reference_study_catalog()
+reference_studies_by_lane = {}
+for study in reference_studies:
+    reference_studies_by_lane.setdefault(study['lane_id'], []).append(study)
 
-if noizeus_samples:
-    # Dataset selection simulation (NOIZEUS)
-    dataset = st.sidebar.selectbox("Select dataset", ["NOIZEUS Database", "Custom Upload"])
+spectral_subtraction_presentation_pdf_source = os.path.join(
+    "assets",
+    "pdf",
+    "presentations",
+    "specsub1.pdf"
+)
+spectral_subtraction_presentation_pdf_url = ensure_static_pdf(
+    spectral_subtraction_presentation_pdf_source,
+    "spectral_subtraction_presentation.pdf"
+)
 
-    if dataset == "NOIZEUS Database":
-        sample_options = [f"{s['name']} ({s['count']} samples)" for s in noizeus_samples]
-        selected_sample_idx = st.sidebar.selectbox("Noise condition", range(len(sample_options)), format_func=lambda x: sample_options[x])
+speech_enhancement_algorithms = algorithm_catalog["Speech Enhancement"]
+track_algorithms = speech_enhancement_algorithms
+available_families = sorted({algorithm['family'] for algorithm in track_algorithms})
+selected_family = available_families[0]
+family_algorithms = [algorithm for algorithm in track_algorithms if algorithm['family'] == selected_family]
+selected_algorithm_label = family_algorithms[0]['label']
+selected_algorithm = family_algorithms[0]
 
-        selected_sample = noizeus_samples[selected_sample_idx]
-        sample_number = st.sidebar.selectbox("Sample number", list(range(1, selected_sample['count'] + 1)), format_func=lambda x: f"Sample {x:02d}")
+dataset_options = [label for label, meta in dataset_catalog.items() if meta['task_scope'] in {"exploration", "speech_enhancement"}]
+dataset = dataset_options[0]
+selected_dataset_meta = dataset_catalog[dataset]
+
+selected_sample = None
+sample_number = 1
+
+run_processing = False
+
+tab_workspace, tab_datasets, tab_benchmarks, tab_knowledge = st.tabs([
+    "🧪 Experiment Workspace",
+    "🗂️ Datasets",
+    "📏 Benchmarks",
+    "📚 Knowledge Base"
+])
+
+with tab_workspace:
+    st.header("🧪 Experiment Workspace")
+    st.markdown("Use this page for qualitative listening tests and single-sample inspection. The full benchmark study stays in its own page.")
+
+    st.markdown("### Experiment Configuration")
+    config_col1, config_col2 = st.columns(2)
+
+    with config_col1:
+        st.caption("Research objective: single-channel speech enhancement")
+        track_algorithms = speech_enhancement_algorithms
+        available_families = sorted({algorithm['family'] for algorithm in track_algorithms})
+        selected_family = st.selectbox(
+            "Algorithm family",
+            available_families,
+            key="workspace_algorithm_family"
+        )
+
+        family_algorithms = [algorithm for algorithm in track_algorithms if algorithm['family'] == selected_family]
+        selected_algorithm_label = st.selectbox(
+            "Algorithm",
+            [algorithm['label'] for algorithm in family_algorithms],
+            key="workspace_algorithm_label"
+        )
+        selected_algorithm = next(
+            algorithm for algorithm in family_algorithms if algorithm['label'] == selected_algorithm_label
+        )
+
+    with config_col2:
+        dataset = st.selectbox(
+            "Dataset / source",
+            dataset_options,
+            key="workspace_dataset"
+        )
+        selected_dataset_meta = dataset_catalog[dataset]
+
+        if dataset == "NOIZEUS Database" and selected_dataset_meta['available']:
+            sample_options = [f"{sample['name']} ({sample['count']} samples)" for sample in noizeus_samples]
+            selected_sample_idx = st.selectbox(
+                "Noise condition",
+                range(len(sample_options)),
+                format_func=lambda index: sample_options[index],
+                key="workspace_noise_condition"
+            )
+            selected_sample = noizeus_samples[selected_sample_idx]
+            sample_number = st.selectbox(
+                "Sample number",
+                list(range(1, selected_sample['count'] + 1)),
+                format_func=lambda value: f"Sample {value:02d}",
+                key="workspace_sample_number"
+            )
+        elif dataset == "NOIZEUS Database":
+            st.error("NOIZEUS dataset not found in assets/NOIZEUS/")
+        elif dataset == "Custom Upload":
+            st.info("Custom upload is a planned workflow for exploratory listening tests.")
+        else:
+            st.info("This dataset is documented as literature context for protocol comparison, not yet as a runnable local dataset.")
+
+    st.caption(f"Purpose: {selected_algorithm['purpose']}")
+    st.caption("Evaluation scope: matched-reference single-channel speech enhancement")
+    if not selected_algorithm['implemented']:
+        st.warning("This algorithm is documented in the app but not implemented yet.")
+
+    run_processing = st.button("Run workspace test 🚀", key="workspace_run_processing")
+
+    col_workspace_1, col_workspace_2, col_workspace_3 = st.columns(3)
+    with col_workspace_1:
+        st.metric("Research objective", "Speech enhancement")
+    with col_workspace_2:
+        st.metric("Algorithm family", selected_algorithm['family'])
+    with col_workspace_3:
+        st.metric("Benchmark dataset", "NOIZEUS-compatible")
+
+    st.info(
+        "Only compare algorithms when the objective, dataset, and clean-reference metrics are aligned. This workspace is therefore centered on the same speech-enhancement scope as the project benchmark."
+    )
+
+    if dataset == "NOIZEUS Database" and selected_sample:
+        with st.spinner("Loading NOIZEUS sample..."):
+            y_noisy, y_clean_ref, sr = load_noizeus_sample(selected_sample['noise_type'], sample_number)
+
+        if y_noisy is None or y_clean_ref is None:
+            st.error(f"Unable to load sample {sample_number} for {selected_sample['name']}")
+            st.stop()
+
+        st.success(f"Loaded sample: {selected_sample['name']} - Sample {sample_number:02d} (SR: {sr} Hz)")
+
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.metric("Noise type", selected_sample['noise_name'].upper())
+        with col_info2:
+            st.metric("Signal-to-noise ratio", selected_sample['snr'])
+        with col_info3:
+            st.metric("Sample", f"#{sample_number:02d}")
     else:
-        st.sidebar.warning("Custom upload not implemented yet.")
-        selected_sample = None
-        sample_number = 1
-else:
-    st.sidebar.error("NOIZEUS dataset not found in assets/NOIZEUS/")
-    dataset = "Custom Upload"
-    selected_sample = None
-    sample_number = 1
+        sample_path = "assets/sample_audio/test_audio.wav"
+        if os.path.exists(sample_path):
+            y_noisy, sr = librosa.load(sample_path, sr=16000)
+            y_clean_ref = y_noisy
+            st.warning("Using fallback test audio because no benchmark-ready sample is selected.")
+        else:
+            y_noisy = None
+            y_clean_ref = None
+            sr = None
+            st.error("No audio file found for the workspace demo.")
 
-# Algorithm menu
-algo_family = st.sidebar.selectbox("Algorithm family", ["Spectral Subtraction", "Subspace Enhancement", "Active Noise Control (LMS)"])
+    st.markdown(f"### Current algorithm: {selected_algorithm['label']}")
+    st.markdown(selected_algorithm['summary'])
 
-if algo_family == "Spectral Subtraction":
-    algo_choice = st.sidebar.selectbox("Specific algorithm", [
-        "Spectral Subtraction (Classic)",
-        "Spectral Subtraction (Over-subtraction)",
-        "Multi-band Spectral Subtraction"
-    ])
-elif algo_family == "Subspace Enhancement":
-    algo_choice = "Subspace Enhancement (SVD)"
-else:
-    algo_choice = st.sidebar.selectbox("Specific algorithm", ["Feedback LMS", "Hybrid LMS", "FxLMS"])
-    st.sidebar.warning("LMS algorithms are under development.")
+    if y_noisy is not None and sr is not None:
+        st.markdown("### Listen before / after")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Noisy signal (original)**")
+            temp_noisy_path = "assets/sample_audio/temp_noisy.wav"
+            sf.write(temp_noisy_path, y_noisy, sr)
+            st.audio(temp_noisy_path)
 
-if st.sidebar.button("Run processing 🚀"):
-    run_processing = True
-else:
-    run_processing = False
+        if run_processing:
+            if not selected_algorithm['implemented']:
+                st.warning("This algorithm is not implemented yet, so the workspace cannot process the sample.")
+            else:
+                with st.spinner("Processing signal..."):
+                    y_enhanced = run_algorithm(selected_algorithm, y_noisy, sr)
+                    temp_clean_path = "assets/sample_audio/temp_enhanced.wav"
+                    sf.write(temp_clean_path, y_enhanced, sr)
 
-# --- MAIN TABS ---
-tab_demo, tab_dataset, tab_analysis, tab_definitions = st.tabs(["🎧 Demo", "📂 Datasets (NOIZEUS)", "📊 Analysis & Metrics", "📘 Definitions & Personal Analysis"])
+                    with col2:
+                        st.write(f"**Enhanced signal ({selected_algorithm['label']})**")
+                        st.audio(temp_clean_path)
 
-with tab_dataset:
-    st.header("📂 Dataset: NOIZEUS")
+                    with st.expander("🔍 View algorithm source code (Python)"):
+                        code_source = inspect.getsource(selected_algorithm['runner'])
+                        st.code(code_source, language='python')
 
-    if noizeus_samples:
-        st.markdown("""
-        The **NOIZEUS** corpus is a benchmark dataset for single-channel speech enhancement.
+                    st.markdown("---")
+                    st.markdown("### Sample-level metrics")
 
-        **Detailed composition (as used in this project):**
-        - 30 clean IEEE sentences (`sp01.wav` to `sp30.wav`)
-        - 8 real-world noise environments: airport, babble, car, exhibition, restaurant, station, street, train
-        - 4 SNR levels per noise: 0 dB, 5 dB, 10 dB, 15 dB
-        - 30 noisy files per condition, aligned with clean references
-        - File naming convention: `spXX_<noise>_sn<snr>.wav` (example: `sp01_airport_sn0.wav`)
+                    if y_clean_ref is not None:
+                        metrics = calculate_metrics(y_noisy, y_clean_ref, y_enhanced, sr)
+                        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 
-        This creates a controlled testbed to compare algorithms under identical speech content
-        with progressively different noise difficulty.
+                        with col_m1:
+                            st.metric("Global SNR improvement", f"{metrics.get('snr_improvement', 0):+.2f} dB")
+                        with col_m2:
+                            st.metric("Segmental SNR improvement", f"{metrics.get('seg_snr_improvement', 0):+.2f} dB")
+                        with col_m3:
+                            st.metric("Perceptual Evaluation of Speech Quality (PESQ)", f"{metrics['pesq']:.3f}" if metrics.get('pesq') is not None else "N/A")
+                        with col_m4:
+                            st.metric("Short-Time Objective Intelligibility (STOI)", f"{metrics['stoi']:.3f}" if metrics.get('stoi') is not None else "N/A")
+                        with col_m5:
+                            st.metric("Mean squared error vs clean reference", f"{np.mean((y_enhanced - y_clean_ref) ** 2):.6f}")
 
-        **Reference link (official source):**
-        http://ecs.utdallas.edu/loizou/speech/noizeus/
-        """)
+                    st.markdown("### Signal visualization")
+                    if y_clean_ref is not None:
+                        fig = plot_signal_analysis(
+                            y_noisy,
+                            y_clean_ref,
+                            y_enhanced,
+                            sr,
+                            f"Analysis: {selected_sample['name']} - Sample {sample_number:02d}" if selected_sample else selected_algorithm['label']
+                        )
+                    else:
+                        fig, axes = plt.subplots(2, 2, figsize=(15, 8))
+                        fig.suptitle("Signal analysis (no clean reference)", fontsize=16)
+                        time = np.linspace(0, len(y_noisy) / sr, len(y_noisy))
 
-        # General statistics
+                        axes[0, 0].plot(time, y_noisy, alpha=0.7)
+                        axes[0, 0].set_title('Waveform - Original')
+                        axes[0, 0].set_xlabel('Time (s)')
+                        axes[0, 0].set_ylabel('Amplitude')
+                        axes[0, 0].grid(True, alpha=0.3)
+
+                        axes[0, 1].plot(time, y_enhanced, color='green')
+                        axes[0, 1].set_title('Waveform - Result')
+                        axes[0, 1].set_xlabel('Time (s)')
+                        axes[0, 1].set_ylabel('Amplitude')
+                        axes[0, 1].grid(True, alpha=0.3)
+
+                        d_noisy = librosa.amplitude_to_db(np.abs(librosa.stft(y_noisy)), ref=np.max)
+                        d_enhanced = librosa.amplitude_to_db(np.abs(librosa.stft(y_enhanced)), ref=np.max)
+                        img1 = librosa.display.specshow(d_noisy, y_axis='hz', x_axis='time', sr=sr, ax=axes[1, 0], cmap='viridis')
+                        axes[1, 0].set_title('Spectrogram - Original')
+                        plt.colorbar(img1, ax=axes[1, 0], format='%+2.0f dB')
+
+                        img2 = librosa.display.specshow(d_enhanced, y_axis='hz', x_axis='time', sr=sr, ax=axes[1, 1], cmap='viridis')
+                        axes[1, 1].set_title('Spectrogram - Enhanced')
+                        plt.colorbar(img2, ax=axes[1, 1], format='%+2.0f dB')
+                        plt.tight_layout()
+
+                    st.pyplot(fig)
+
+                    st.markdown("### Additional statistics")
+                    col_stat1, col_stat2, col_stat3 = st.columns(3)
+                    with col_stat1:
+                        st.markdown("**Original signal**")
+                        st.write(f"- RMS: {np.sqrt(np.mean(y_noisy**2)):.4f}")
+                        st.write(f"- Max: {np.max(np.abs(y_noisy)):.4f}")
+                    with col_stat2:
+                        st.markdown("**Enhanced signal**")
+                        st.write(f"- RMS: {np.sqrt(np.mean(y_enhanced**2)):.4f}")
+                        st.write(f"- Max: {np.max(np.abs(y_enhanced)):.4f}")
+                    with col_stat3:
+                        st.markdown("**Comparison**")
+                        if y_clean_ref is not None:
+                            corr_orig = np.corrcoef(y_noisy, y_clean_ref)[0, 1]
+                            corr_enh = np.corrcoef(y_enhanced, y_clean_ref)[0, 1]
+                            st.write(f"- Original correlation: {corr_orig:.3f}")
+                            st.write(f"- Enhanced correlation: {corr_enh:.3f}")
+                            st.write(f"- Improvement: {corr_enh - corr_orig:+.3f}")
+        else:
+            st.info("Use the button above to run a single-sample workspace test.")
+
+with tab_datasets:
+    st.header("🗂️ Dataset Catalog")
+    st.markdown("Datasets are described independently from experiments so the app can remain reusable while keeping the current benchmark scope clear.")
+
+    dataset_rows = []
+    for label, meta in dataset_catalog.items():
+        dataset_rows.append({
+            'Dataset': label,
+            'Available': "Yes" if meta['available'] else "No",
+            'Task scope': meta['task_scope'],
+            'Benchmark-ready': "Yes" if meta['benchmark_ready'] else "No",
+            'Description': meta['description']
+        })
+    st.dataframe(pd.DataFrame(dataset_rows), use_container_width=True)
+
+    selected_dataset_name = st.selectbox("Inspect dataset details", list(dataset_catalog.keys()), key="dataset_catalog_select")
+    dataset_details = dataset_catalog[selected_dataset_name]
+
+    st.subheader(selected_dataset_name)
+    st.markdown(dataset_details['description'])
+    render_markdown_list(dataset_details['details'])
+    if dataset_details['reference']:
+        st.markdown(f"Reference: {dataset_details['reference']}")
+
+    if selected_dataset_name == "NOIZEUS Database" and noizeus_samples:
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         with col_stat1:
-            st.metric("Noise types", len(set([s['noise_name'] for s in noizeus_samples])))
+            st.metric("Noise types", len({sample['noise_name'] for sample in noizeus_samples}))
         with col_stat2:
-            st.metric("SNR levels", len(set([s['snr'] for s in noizeus_samples])))
+            st.metric("Signal-to-noise ratio levels", len({sample['snr'] for sample in noizeus_samples}))
         with col_stat3:
-            st.metric("Total samples", sum([s['count'] for s in noizeus_samples]))
+            st.metric("Total samples", sum(sample['count'] for sample in noizeus_samples))
 
-        # Detailed sample list
-        st.markdown("### Available samples")
-        st.markdown("Each condition contains 30 audio samples (sp01.wav to sp30.wav)")
-
-        # Group by noise type
         noise_types = {}
         for sample in noizeus_samples:
-            noise = sample['noise_name']
-            if noise not in noise_types:
-                noise_types[noise] = []
-            noise_types[noise].append(sample)
+            noise_types.setdefault(sample['noise_name'], []).append(sample)
 
+        st.markdown("### Browse NOIZEUS conditions")
         for noise_name, samples in noise_types.items():
-            with st.expander(f"🔊 {noise_name.upper()} - {len(samples)} SNR conditions"):
+            with st.expander(f"{noise_name.upper()} - {len(samples)} signal-to-noise ratio conditions"):
                 cols = st.columns(len(samples))
-                for i, sample in enumerate(samples):
-                    with cols[i]:
+                for index, sample in enumerate(samples):
+                    with cols[index]:
                         st.markdown(f"**{sample['snr']}**")
                         st.write(f"{sample['count']} samples")
-                        if st.button(f"Play sample 01", key=f"listen_{noise_name}_{sample['snr']}"):
-                            y_ex, y_clean_ex, sr_ex = load_noizeus_sample(sample['noise_type'], 1)
+                        if st.button("Play sample 01", key=f"listen_{noise_name}_{sample['snr']}"):
+                            y_ex, _, sr_ex = load_noizeus_sample(sample['noise_type'], 1)
                             if y_ex is not None:
                                 temp_ex_path = f"assets/sample_audio/temp_example_{noise_name}_{sample['snr']}.wav"
                                 sf.write(temp_ex_path, y_ex, sr_ex)
                                 st.audio(temp_ex_path, format='audio/wav')
 
-        # File structure information
         st.markdown("### File structure")
         st.code("""
 assets/NOIZEUS/
@@ -358,458 +705,303 @@ assets/NOIZEUS/
 └── ... (7 other noise types)
         """)
 
-    else:
-        st.error("NOIZEUS dataset not found. Make sure files are extracted to assets/NOIZEUS/")
+with tab_benchmarks:
+    st.header("📏 Benchmark Study")
+    st.markdown("This section keeps the project benchmark, the protocol description, and the literature context clearly separated.")
 
-        # User instructions
-        st.markdown("### Installation instructions:")
-        st.markdown("""
-        1. Download the NOIZEUS dataset from the official source
-        2. Place the .zip files in `assets/NOIZEUS/`
-        3. The files will be extracted and organized automatically
-        """)
+    benchmark_overview_tab, benchmark_run_tab, benchmark_reference_tab = st.tabs([
+        "Overview",
+        "Run Benchmark",
+        "Literature Context"
+    ])
 
-with tab_demo:
-    st.subheader(f"Current test: {algo_choice}")
+    with benchmark_overview_tab:
+        for benchmark in benchmark_catalog:
+            with st.expander(f"{benchmark['type']}: {benchmark['label']}", expanded=benchmark['type'] == "Project benchmark"):
+                st.markdown(f"**Goal:** {benchmark['goal']}")
+                st.markdown(f"**Scope:** {benchmark['scope']}")
+                st.markdown(f"**Status:** {benchmark['status']}")
+                st.markdown(f"**Datasets:** {', '.join(benchmark['datasets'])}")
+                st.markdown(f"**Reference studies tracked:** {len(reference_studies_by_lane.get(benchmark['id'], []))}")
+                st.markdown(f"**Comparison rule:** {benchmark['comparison_rule']}")
+                render_markdown_list(benchmark['notes'])
 
-    # Load the selected sample
-    if dataset == "NOIZEUS Database" and selected_sample:
-        with st.spinner("Loading NOIZEUS sample..."):
-            y_noisy, y_clean_ref, sr = load_noizeus_sample(selected_sample['noise_type'], sample_number)
+    with benchmark_reference_tab:
+        st.subheader("Literature context and protocol notes")
+        st.markdown("Use this section to document external studies and benchmark protocols without mixing them with your computed project results.")
 
-        if y_noisy is None or y_clean_ref is None:
-            st.error(f"Unable to load sample {sample_number} for {selected_sample['name']}")
-            st.stop()
+        reference_rows = []
+        for benchmark in benchmark_catalog:
+            if benchmark['type'] != "Project benchmark":
+                reference_rows.append({
+                    'Benchmark lane': benchmark['label'],
+                    'Scope': benchmark['scope'],
+                    'Status': benchmark['status'],
+                    'Tracked studies': len(reference_studies_by_lane.get(benchmark['id'], [])),
+                    'How to use it': benchmark['goal']
+                })
+        st.dataframe(pd.DataFrame(reference_rows), use_container_width=True)
 
-        st.success(f"✅ Loaded sample: {selected_sample['name']} - Sample {sample_number:02d} (SR: {sr} Hz)")
+        lane_options = [benchmark for benchmark in benchmark_catalog if benchmark['type'] != "Project benchmark"]
+        selected_reference_lane_label = st.selectbox(
+            "Reference lane",
+            [benchmark['label'] for benchmark in lane_options],
+            key="reference_lane_select"
+        )
+        selected_reference_lane = next(
+            benchmark for benchmark in lane_options if benchmark['label'] == selected_reference_lane_label
+        )
+        selected_lane_studies = reference_studies_by_lane.get(selected_reference_lane['id'], [])
 
-        # Display sample metadata
-        col_info1, col_info2, col_info3 = st.columns(3)
-        with col_info1:
-            st.metric("Noise type", selected_sample['noise_name'].upper())
-        with col_info2:
-            st.metric("SNR", f"{selected_sample['snr']}")
-        with col_info3:
-            st.metric("Sample", f"#{sample_number:02d}")
+        st.markdown("### Lane protocol policy")
+        st.markdown(selected_reference_lane['comparison_rule'])
+    with benchmark_run_tab:
+        st.subheader("Run your project benchmark")
+        st.markdown("This runnable section is reserved for the benchmark that is directly comparable inside the app: single-channel speech enhancement on NOIZEUS.")
 
-    else:
-        # Fallback to the test sample
-        sample_path = "assets/sample_audio/test_audio.wav"
-        if os.path.exists(sample_path):
-            y_noisy, sr = librosa.load(sample_path, sr=16000)
-            y_clean_ref = y_noisy  # No clean reference available
-            st.warning("⚠️ Using test sample (no clean reference available)")
+        enhancement_algorithms = [
+            algorithm for algorithm in algorithm_catalog["Speech Enhancement"]
+            if algorithm['implemented'] and algorithm['benchmark_group'] == "speech_enhancement"
+        ]
+
+        if not noizeus_samples:
+            st.error("NOIZEUS dataset required for the current project benchmark.")
         else:
-            st.error("No audio file found!")
-            st.stop()
+            available_analysis_noises = sorted({sample['noise_name'] for sample in noizeus_samples})
+            available_analysis_snrs = sorted({sample['snr'] for sample in noizeus_samples})
 
-    st.markdown("### Listen before / after")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Noisy signal (original)**")
-        temp_noisy_path = "assets/sample_audio/temp_noisy.wav"
-        sf.write(temp_noisy_path, y_noisy, sr)
-        st.audio(temp_noisy_path)
+            run_mode = st.radio(
+                "Benchmark scope",
+                ["Single condition", "Full dataset (all noise types × all SNR levels)"],
+                horizontal=True,
+                key="bench_mode"
+            )
 
-    # Start processing
-    if run_processing:
-        with st.spinner("Processing signal..."):
+            if run_mode == "Single condition":
+                col_sel1, col_sel2 = st.columns(2)
+                with col_sel1:
+                    analysis_noise = st.selectbox("Noise type", available_analysis_noises, key="analysis_noise")
+                with col_sel2:
+                    analysis_snr = st.selectbox("Signal-to-noise ratio level", available_analysis_snrs, key="analysis_snr")
 
-            # Map chosen algorithm to the Python function
-            if algo_choice == "Spectral Subtraction (Classic)":
-                func = spectral_subtraction
-                y_enhanced = func(y_noisy, sr)
-            elif algo_choice == "Spectral Subtraction (Over-subtraction)":
-                func = spectral_subtraction_oversubtraction
-                y_enhanced = func(y_noisy, sr)
-            elif algo_choice == "Multi-band Spectral Subtraction":
-                func = multiband_spectral_subtraction
-                y_enhanced = func(y_noisy, sr)
-            elif algo_choice == "Subspace Enhancement (SVD)":
-                func = subspace_enhance
-                y_enhanced = func(y_noisy)
-            else:
-                st.warning("Algorithm not implemented for playback.")
-                st.stop()
-
-            temp_clean_path = "assets/sample_audio/temp_enhanced.wav"
-            sf.write(temp_clean_path, y_enhanced, sr)
-
-            with col2:
-                st.write(f"**Enhanced signal ({algo_choice})**")
-                st.audio(temp_clean_path)
-
-            # --- DYNAMIC SOURCE CODE DISPLAY ---
-            with st.expander("🔍 View algorithm source code (Python)"):
-                code_source = inspect.getsource(func)
-                st.code(code_source, language='python')
-
-            st.markdown("---")
-            st.markdown("### 📊 Full analysis")
-
-            # Metric calculation
-            if 'y_clean_ref' in locals() and y_clean_ref is not None:
-                metrics = calculate_metrics(y_noisy, y_clean_ref, y_enhanced, sr)
-
-                st.markdown("#### Objective metrics")
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-
-                with col_m1:
-                    if 'snr_improvement' in metrics:
-                        st.metric(
-                            label="SNR improvement",
-                            value=f"{metrics['snr_improvement']:+.2f} dB",
-                            delta="vs noisy signal"
-                        )
-
-                with col_m2:
-                    if metrics.get('pesq') is not None:
-                        st.metric(
-                            label="PESQ score",
-                            value=f"{metrics['pesq']:.3f}",
-                            delta="Perceptual quality"
-                        )
-                    else:
-                        st.metric(label="PESQ score", value="N/A")
-
-                with col_m3:
-                    if metrics.get('stoi') is not None:
-                        st.metric(
-                            label="STOI score",
-                            value=f"{metrics['stoi']:.3f}",
-                            delta="Intelligibility"
-                        )
-                    else:
-                        st.metric(label="STOI score", value="N/A")
-
-                with col_m4:
-                    mse = np.mean((y_enhanced - y_clean_ref) ** 2)
-                    st.metric(
-                        label="MSE vs clean",
-                        value=f"{mse:.6f}",
-                        delta="Mean squared error"
-                    )
-
-            # Visual signal analysis
-            st.markdown("#### Signal visualization")
-            if 'y_clean_ref' in locals() and y_clean_ref is not None:
-                fig = plot_signal_analysis(y_noisy, y_clean_ref, y_enhanced, sr,
-                                         f"Analysis: {selected_sample['name']} - Sample {sample_number:02d}")
-            else:
-                # Simplified analysis without clean reference
-                fig, axes = plt.subplots(2, 2, figsize=(15, 8))
-                fig.suptitle("Signal analysis (no clean reference)", fontsize=16)
-
-                time = np.linspace(0, len(y_noisy)/sr, len(y_noisy))
-
-                # Waveform
-                axes[0,0].plot(time, y_noisy, alpha=0.7, label='Noisy')
-                axes[0,0].set_title('Waveform - Original')
-                axes[0,0].set_xlabel('Time (s)')
-                axes[0,0].set_ylabel('Amplitude')
-                axes[0,0].grid(True, alpha=0.3)
-
-                axes[0,1].plot(time, y_enhanced, color='green', label='Enhanced')
-                axes[0,1].set_title('Waveform - Result')
-                axes[0,1].set_xlabel('Time (s)')
-                axes[0,1].set_ylabel('Amplitude')
-                axes[0,1].grid(True, alpha=0.3)
-
-                # Spectrograms
-                D_noisy = librosa.amplitude_to_db(np.abs(librosa.stft(y_noisy)), ref=np.max)
-                D_enhanced = librosa.amplitude_to_db(np.abs(librosa.stft(y_enhanced)), ref=np.max)
-
-                img1 = librosa.display.specshow(D_noisy, y_axis='hz', x_axis='time', sr=sr, ax=axes[1,0], cmap='viridis')
-                axes[1,0].set_title('Spectrogram - Original')
-                plt.colorbar(img1, ax=axes[1,0], format='%+2.0f dB')
-
-                img2 = librosa.display.specshow(D_enhanced, y_axis='hz', x_axis='time', sr=sr, ax=axes[1,1], cmap='viridis')
-                axes[1,1].set_title('Spectrogram - Enhanced')
-                plt.colorbar(img2, ax=axes[1,1], format='%+2.0f dB')
-
-                plt.tight_layout()
-
-            st.pyplot(fig)
-
-            # Additional statistics
-            st.markdown("#### Additional statistics")
-            col_stat1, col_stat2, col_stat3 = st.columns(3)
-
-            with col_stat1:
-                st.markdown("**Original signal:**")
-                st.write(f"- RMS: {np.sqrt(np.mean(y_noisy**2)):.4f}")
-                st.write(f"- Max: {np.max(np.abs(y_noisy)):.4f}")
-                st.write(f"- Estimated SNR: {10*np.log10(np.mean(y_noisy**2)/np.var(y_noisy - y_clean_ref)) if 'y_clean_ref' in locals() and y_clean_ref is not None else 'N/A':.1f} dB")
-
-            with col_stat2:
-                st.markdown("**Enhanced signal:**")
-                st.write(f"- RMS: {np.sqrt(np.mean(y_enhanced**2)):.4f}")
-                st.write(f"- Max: {np.max(np.abs(y_enhanced)):.4f}")
-                st.write(f"- Estimated SNR: {10*np.log10(np.mean(y_enhanced**2)/np.var(y_enhanced - y_clean_ref)) if 'y_clean_ref' in locals() and y_clean_ref is not None else 'N/A':.1f} dB")
-
-            with col_stat3:
-                st.markdown("**Comparison:**")
-                if 'y_clean_ref' in locals() and y_clean_ref is not None:
-                    corr_orig = np.corrcoef(y_noisy, y_clean_ref)[0,1]
-                    corr_enh = np.corrcoef(y_enhanced, y_clean_ref)[0,1]
-                    st.write(f"- Original correlation: {corr_orig:.3f}")
-                    st.write(f"- Enhanced correlation: {corr_enh:.3f}")
-                    st.write(f"- Improvement: {corr_enh - corr_orig:+.3f}")
-
-    else:
-        st.info("👈 Select an algorithm and click 'Run processing' in the sidebar.")
-
-with tab_analysis:
-    st.header("📊 Advanced Analysis & Metrics")
-
-    if not noizeus_samples:
-        st.error("NOIZEUS dataset required for advanced analysis")
-        st.stop()
-
-    st.markdown("""
-    This section provides detailed analysis and objective metrics to evaluate
-    the performance of noise reduction algorithms.
-    """)
-
-    # Analysis parameter selection
-    col_sel1, col_sel2 = st.columns(2)
-    available_analysis_noises = sorted({sample['noise_name'] for sample in noizeus_samples})
-
-    with col_sel1:
-        analysis_noise = st.selectbox(
-            "Noise type for analysis",
-            available_analysis_noises,
-            key="analysis_noise"
-        )
-
-    with col_sel2:
-        analysis_snr = st.selectbox(
-            "SNR level",
-            ["0dB", "5dB", "10dB", "15dB"],
-            key="analysis_snr"
-        )
-
-    # Find the matching sample
-    selected_analysis_sample = None
-    for s in noizeus_samples:
-        if s['noise_name'] == analysis_noise and s['snr'] == analysis_snr:
-            selected_analysis_sample = s
-            break
-
-    if selected_analysis_sample and st.button("🚀 Run full analysis", key="run_analysis"):
-
-        with st.spinner("Analyzing all samples in this condition..."):
-
-            # Analyze all samples in this condition
-            results = []
-            for sample_idx in range(1, selected_analysis_sample['count'] + 1):
-
-                # Load signals
-                y_noisy, y_clean, sr = load_noizeus_sample(selected_analysis_sample['noise_type'], sample_idx)
-                if y_noisy is None or y_clean is None:
-                    continue
-
-                # Apply all available algorithms
-                algorithms = {
-                    "Spectral Subtraction": spectral_subtraction,
-                    "Over-subtraction": spectral_subtraction_oversubtraction,
-                    "Multi-band": multiband_spectral_subtraction,
-                    "Subspace": subspace_enhance
-                }
-
-                sample_results = {'sample': sample_idx}
-                for algo_name, algo_func in algorithms.items():
-                    try:
-                        if algo_name == "Subspace":
-                            y_enhanced = algo_func(y_noisy)
-                        else:
-                            y_enhanced = algo_func(y_noisy, sr)
-
-                        # Compute metrics
-                        metrics = calculate_metrics(y_noisy, y_clean, y_enhanced, sr)
-                        sample_results[algo_name] = metrics
-
-                    except Exception as e:
-                        sample_results[algo_name] = {'error': str(e)}
-
-                results.append(sample_results)
-
-            # Display results
-            st.success(f"✅ Analysis completed on {len(results)} samples")
-
-            # Performance summary
-            st.markdown("### 📈 Performance summary")
-
-            # Compute averages
-            algo_names = list(algorithms.keys())
-            metrics_names = ['snr_improvement', 'pesq', 'stoi']
-
-            summary_data = {}
-            for algo in algo_names:
-                summary_data[algo] = {}
-                for metric in metrics_names:
-                    values = [r[algo].get(metric) for r in results if algo in r and metric in r[algo] and r[algo][metric] is not None]
-                    if values:
-                        summary_data[algo][metric] = {
-                            'mean': np.mean(values),
-                            'std': np.std(values),
-                            'min': np.min(values),
-                            'max': np.max(values)
-                        }
-
-            # Show metrics as a table
-            import pandas as pd
-
-            summary_df = pd.DataFrame(index=algo_names, columns=[f"{m.upper()} (mean ± std)" for m in metrics_names])
-
-            for algo in algo_names:
-                for metric in metrics_names:
-                    if metric in summary_data[algo]:
-                        val = summary_data[algo][metric]
-                        summary_df.loc[algo, f"{metric.upper()} (mean ± std)"] = f"{val['mean']:.3f} ± {val['std']:.3f}"
-
-            st.dataframe(summary_df)
-
-            # Comparison plots
-            st.markdown("### Visual comparisons")
-
-            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-            # SNR Improvement
-            snr_data = {algo: [r[algo].get('snr_improvement', 0) for r in results if algo in r] for algo in algo_names}
-            axes[0].boxplot([snr_data[algo] for algo in algo_names], labels=algo_names)
-            axes[0].set_title('SNR Improvement (dB)')
-            axes[0].set_ylabel('dB')
-            axes[0].grid(True, alpha=0.3)
-
-            # PESQ Scores
-            pesq_data = {algo: [r[algo].get('pesq', 0) for r in results if algo in r and r[algo].get('pesq') is not None] for algo in algo_names}
-            if any(pesq_data.values()):
-                axes[1].boxplot([pesq_data[algo] for algo in algo_names if pesq_data[algo]], labels=[algo for algo in algo_names if pesq_data[algo]])
-                axes[1].set_title('PESQ Scores')
-                axes[1].set_ylabel('Score (0-4.5)')
-                axes[1].set_ylim(0, 4.5)
-                axes[1].grid(True, alpha=0.3)
-
-            # STOI Scores
-            stoi_data = {algo: [r[algo].get('stoi', 0) for r in results if algo in r and r[algo].get('stoi') is not None] for algo in algo_names}
-            if any(stoi_data.values()):
-                axes[2].boxplot([stoi_data[algo] for algo in algo_names if stoi_data[algo]], labels=[algo for algo in algo_names if stoi_data[algo]])
-                axes[2].set_title('STOI Scores')
-                axes[2].set_ylabel('Score (0-1)')
-                axes[2].set_ylim(0, 1)
-                axes[2].grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            st.pyplot(fig)
-
-            # Export results
-            if st.button("📥 Export results (CSV)"):
-                # Convert to DataFrame for export
-                export_data = []
-                for r in results:
-                    row = {'Sample': r['sample']}
-                    for algo in algo_names:
-                        if algo in r:
-                            for metric in metrics_names:
-                                val = r[algo].get(metric)
-                                row[f"{algo}_{metric}"] = val if val is not None else 'N/A'
-                    export_data.append(row)
-
-                export_df = pd.DataFrame(export_data)
-                csv_data = export_df.to_csv(index=False)
-
-                st.download_button(
-                    label="Download CSV",
-                    data=csv_data,
-                    file_name=f"analysis_{analysis_noise}_{analysis_snr}.csv",
-                    mime="text/csv"
+                selected_analysis_sample = next(
+                    (s for s in noizeus_samples if s['noise_name'] == analysis_noise and s['snr'] == analysis_snr),
+                    None
                 )
 
-    else:
-        st.info("👈 Select a noise type and SNR level, then click 'Run full analysis'")
+                if selected_analysis_sample and st.button("Run benchmark on this condition", key="run_analysis"):
+                    with st.spinner("Analyzing all samples in this condition..."):
+                        results = []
+                        for sample_idx in range(1, selected_analysis_sample['count'] + 1):
+                            y_noisy, y_clean, sr = load_noizeus_sample(selected_analysis_sample['noise_type'], sample_idx)
+                            if y_noisy is None or y_clean is None:
+                                continue
+                            sample_results = {'Sample': sample_idx, 'noise': analysis_noise, 'snr': analysis_snr}
+                            for algorithm in enhancement_algorithms:
+                                try:
+                                    y_enhanced = run_algorithm(algorithm, y_noisy, sr)
+                                    sample_results[algorithm['label']] = calculate_metrics(y_noisy, y_clean, y_enhanced, sr)
+                                except Exception as exc:
+                                    sample_results[algorithm['label']] = {'error': str(exc)}
+                            results.append(sample_results)
 
-with tab_definitions:
-    st.header("📘 Definitions and Personal Analysis")
-    st.markdown("""
-    This section defines the main technical terms used in the dashboard and collects literature references.
-    You can add your own personal comments and analysis below each definition.
-    """)
+                        st.session_state['benchmark_results'] = results
+                        st.session_state['benchmark_mode'] = 'single'
+                        st.session_state['benchmark_noise'] = analysis_noise
+                        st.session_state['benchmark_snr'] = analysis_snr
+                        st.session_state['benchmark_algorithms'] = enhancement_algorithms
+                        st.success(f"Benchmark completed on {len(results)} samples")
 
-    st.markdown("### Quick term links")
-    st.markdown("[PESQ](#pesq) | [STOI](#stoi) | [SNR](#snr) | [Spectral Subtraction](#spectral-subtraction) | [Subspace Enhancement](#subspace-enhancement) | [ANC](#anc) | [NOIZEUS](#noizeus)")
+                elif 'benchmark_results' not in st.session_state:
+                    st.info("Select a NOIZEUS condition, then run the benchmark.")
 
-    spectral_subtraction_presentation_pdf_source = os.path.join(
-        "assets",
-        "pdf",
-        "presentations",
-        "specsub1.pdf"
-    )
-    spectral_subtraction_presentation_pdf_url = ensure_static_pdf(
-        spectral_subtraction_presentation_pdf_source,
-        "spectral_subtraction_presentation.pdf"
-    )
+            else:
+                total_utterances = sum(s['count'] for s in noizeus_samples)
+                st.info(
+                    f"Will process **{total_utterances} utterances** across "
+                    f"**{len(available_analysis_noises)} noise types × {len(available_analysis_snrs)} SNR levels**. "
+                    f"This takes several minutes."
+                )
+                if st.button("Run full dataset benchmark", key="run_full"):
+                    results = []
+                    progress = st.progress(0, text="Starting…")
+                    total_conditions = len(noizeus_samples)
+                    for cond_idx, sample_meta in enumerate(noizeus_samples):
+                        progress.progress(
+                            cond_idx / total_conditions,
+                            text=f"Condition {cond_idx + 1}/{total_conditions}: {sample_meta['noise_name']} {sample_meta['snr']}"
+                        )
+                        for sample_idx in range(1, sample_meta['count'] + 1):
+                            y_noisy, y_clean, sr = load_noizeus_sample(sample_meta['noise_type'], sample_idx)
+                            if y_noisy is None or y_clean is None:
+                                continue
+                            sample_results = {
+                                'Sample': sample_idx,
+                                'noise': sample_meta['noise_name'],
+                                'snr': sample_meta['snr'],
+                            }
+                            for algorithm in enhancement_algorithms:
+                                try:
+                                    y_enhanced = run_algorithm(algorithm, y_noisy, sr)
+                                    sample_results[algorithm['label']] = calculate_metrics(y_noisy, y_clean, y_enhanced, sr)
+                                except Exception as exc:
+                                    sample_results[algorithm['label']] = {'error': str(exc)}
+                            results.append(sample_results)
+                    progress.progress(1.0, text="Done")
 
+                    st.session_state['benchmark_results'] = results
+                    st.session_state['benchmark_mode'] = 'full'
+                    st.session_state['benchmark_algorithms'] = enhancement_algorithms
+                    st.success(f"Full benchmark completed on {len(results)} utterances")
 
+                elif 'benchmark_results' not in st.session_state:
+                    st.info("Run the full dataset benchmark above to get a global algorithm ranking.")
 
-    st.markdown("<a id='pesq'></a>", unsafe_allow_html=True)
-    st.markdown("### PESQ")
-    st.markdown("PESQ (Perceptual Evaluation of Speech Quality) is an objective metric that estimates perceived speech quality on a scale typically between 1.0 and 4.5. It is widely used to evaluate speech enhancement algorithms.")
-    st.markdown("**References:** [ITU-T P.862](https://www.itu.int/rec/T-REC-P.862/en); [GitHub repository of the Python library](https://github.com/ludlows/PESQ/tree/v0.0.4)")
-    st.markdown("**Personal comments:** In this project, PESQ is calculated using the `pesq` Python package, which implements the ITU-T standard. The [GitHub repository](https://github.com/ludlows/PESQ/tree/v0.0.4) provides the implementation used." \
-    " The PESQ score is basically calculated using a mathematical model that simulates human hearing to compare the reference and degraded signals and return a standardized perceptual quality score.")
+            # ── Display cached results ──────────────────────────────────────────
+            if 'benchmark_results' in st.session_state:
+                results = st.session_state['benchmark_results']
+                cached_algorithms = st.session_state['benchmark_algorithms']
+                bench_mode = st.session_state.get('benchmark_mode', 'single')
 
-    st.markdown("<a id='stoi'></a>", unsafe_allow_html=True)
-    st.markdown("### STOI")
-    st.markdown("STOI (Short-Time Objective Intelligibility) estimates speech intelligibility by comparing clean and processed signals. It ranges from 0 to 1, with higher values indicating better intelligibility.")
-    st.markdown("""
-    **References:**
-    1. C. H. Taal, R. C. Hendriks, R. Heusdens, J. Jensen, *A Short-Time Objective Intelligibility Measure for Time-Frequency Weighted Noisy Speech*, ICASSP 2010. [DOI:10.1109/ICASSP.2010.5495701](https://doi.org/10.1109/ICASSP.2010.5495701)
-    2. C. H. Taal, R. C. Hendriks, R. Heusdens, J. Jensen, *An Algorithm for Intelligibility Prediction of Time-Frequency Weighted Noisy Speech*, IEEE Transactions on Audio, Speech, and Language Processing, 2011. [DOI:10.1109/TASL.2011.2114881](https://doi.org/10.1109/TASL.2011.2114881)
-    3. J. Jensen, C. H. Taal, *An Algorithm for Predicting the Intelligibility of Speech Masked by Modulated Noise Maskers*, IEEE/ACM Transactions on Audio, Speech, and Language Processing, 2016. [DOI:10.1109/TASLP.2016.2585878](https://doi.org/10.1109/TASLP.2016.2585878)
-    """)
-    st.markdown("**Personal comments:** In this project, STOI is calculated using the `pystoi` Python package, which provides an objective measure of speech intelligibility.")
+                algo_labels = [a['label'] for a in cached_algorithms]
+                family_lookup = {a['label']: a['family'] for a in cached_algorithms}
+                metrics_names = ['snr_improvement', 'seg_snr_improvement', 'pesq', 'stoi']
+                metric_display = {
+                    'snr_improvement': "SNRi (dB)",
+                    'seg_snr_improvement': "SegSNRi (dB)",
+                    'pesq': "PESQ",
+                    'stoi': "STOI",
+                }
 
-    st.markdown("<a id='snr'></a>", unsafe_allow_html=True)
-    st.markdown("### SNR")
-    st.markdown("SNR (Signal-to-Noise Ratio) measures the ratio between clean signal power and noise power. It is often reported in decibels (dB) and is a primary objective measure for noise reduction performance.")
-    st.markdown(r"**Equation:** $\mathrm{SNR}_{\mathrm{dB}} = 10\log_{10}\left(\frac{P_{\mathrm{signal}}}{P_{\mathrm{noise}}}\right)$")
-    st.markdown(r"For discrete-time signals: $\mathrm{SNR}_{\mathrm{dB}} = 10\log_{10}\left(\frac{\sum_n s[n]^2}{\sum_n (x[n]-s[n])^2}\right)$, where $x[n]$ is noisy speech and $s[n]$ is clean speech.")
-    st.markdown("**References:** [SNR on wikipedia](https://en.wikipedia.org/wiki/Signal-to-noise_ratio)")
-    st.markdown("**Personal comments:** ")
+                if bench_mode == 'single':
+                    cached_noise = st.session_state.get('benchmark_noise', '?')
+                    cached_snr = st.session_state.get('benchmark_snr', '?')
+                    st.caption(f"Results for **{cached_noise}** at **{cached_snr}** — switch to Full dataset or re-run to update.")
+                else:
+                    noises_covered = sorted({r['noise'] for r in results})
+                    snrs_covered = sorted({r['snr'] for r in results})
+                    st.caption(
+                        f"Full dataset results — {len(noises_covered)} noise types × {len(snrs_covered)} SNR levels "
+                        f"({len(results)} utterances total)."
+                    )
 
-    st.markdown("<a id='spectral-subtraction'></a>", unsafe_allow_html=True)
-    st.markdown("### Spectral Subtraction")
-    st.markdown("Spectral subtraction is a classic speech enhancement technique that estimates noise from non-speech segments and subtracts it from the noisy speech spectrum. Variants include over-subtraction and multi-band subtraction.")
-    st.markdown("**References:** [Boll, 1979](https://ieeexplore.ieee.org/document/1163209); P. C. Loizou, *Speech Enhancement: Theory and Practice*, 2nd ed., CRC Press, 2013.")
-    st.markdown("**Personal comments:**")
+                # ── Aggregate means table ──────────────────────────────────────
+                agg_rows = []
+                for algo in cached_algorithms:
+                    lbl = algo['label']
+                    row = {'Algorithm': lbl, 'Family': algo['family']}
+                    for metric in metrics_names:
+                        values = [
+                            r[lbl].get(metric)
+                            for r in results
+                            if lbl in r and isinstance(r[lbl], dict) and r[lbl].get(metric) is not None
+                        ]
+                        row[metric_display[metric]] = round(float(np.mean(values)), 3) if values else None
+                    agg_rows.append(row)
 
-    if spectral_subtraction_presentation_pdf_url:
-        st.markdown(
-            f'Presentation PDF: <a href="{spectral_subtraction_presentation_pdf_url}" download="spectral_subtraction_presentation.pdf">Download</a>',
-            unsafe_allow_html=True
-        )
+                agg_df = pd.DataFrame(agg_rows).set_index('Algorithm')
 
-        if st.checkbox("Show PDF preview (Spectral Subtraction)", key="preview_spectral_subtraction_pdf"):
-            if not render_pdf_preview(spectral_subtraction_presentation_pdf_source):
-                st.warning("Unable to generate the Spectral Subtraction PDF preview.")
-    else:
-        st.info("The Spectral Subtraction presentation PDF was not found in assets/pdf/presentations/.")
+                if bench_mode == 'full':
+                    # Composite score: normalise each metric to [0,1] then average
+                    score_cols = list(metric_display.values())
+                    normed = agg_df[score_cols].copy().astype(float)
+                    for col in score_cols:
+                        col_min, col_max = normed[col].min(), normed[col].max()
+                        if col_max > col_min:
+                            normed[col] = (normed[col] - col_min) / (col_max - col_min)
+                        else:
+                            normed[col] = 0.5
+                    agg_df['Composite score'] = normed.mean(axis=1).round(3)
+                    agg_df = agg_df.sort_values('Composite score', ascending=False)
+                    agg_df.insert(0, 'Rank', range(1, len(agg_df) + 1))
 
-    st.markdown("<a id='subspace-enhancement'></a>", unsafe_allow_html=True)
-    st.markdown("### Subspace Enhancement")
-    st.markdown("Subspace enhancement uses matrix decompositions to separate speech and noise subspaces. The algorithm then reconstructs the signal from the estimated speech subspace, improving noise suppression.")
-    st.markdown("**References:** [Huang and Huang, 2001](https://ieeexplore.ieee.org/document/969612); P. C. Loizou, *Speech Enhancement: Theory and Practice*, 2nd ed., CRC Press, 2013.")
-    st.markdown("**Personal comments:**")
+                    st.markdown("### Global ranking")
+                    st.markdown(
+                        "Composite score = average of per-metric min-max normalised values across all conditions. "
+                        "Higher is better. Rank 1 is the best overall algorithm."
+                    )
 
-    st.markdown("<a id='anc'></a>", unsafe_allow_html=True)
-    st.markdown("### ANC")
-    st.markdown("Active Noise Control (ANC) uses an anti-noise signal generated by a filter to cancel unwanted noise. It is commonly used in headphones and acoustic systems.")
-    st.markdown("**References:** [Widrow et al., 1975](https://ieeexplore.ieee.org/document/1163658)")
-    st.markdown("**Personal comments:** Add your notes here.")
+                st.markdown("### Summary table" if bench_mode == 'single' else "### Per-algorithm aggregate (all conditions)")
+                st.dataframe(agg_df, use_container_width=True)
 
-    st.markdown("<a id='noizeus'></a>", unsafe_allow_html=True)
-    st.markdown("### NOIZEUS")
-    st.markdown("NOIZEUS is a speech corpus with noisy recordings at multiple SNR levels, commonly used to benchmark speech enhancement algorithms. It contains clean references and several real-world noise conditions.")
-    st.markdown("**References:** [NOIZEUS dataset information](https://ecs.utdallas.edu/loizou/speech/noizeus/) ")
-    st.markdown("**Personal comments:** See the dataset tab for more details on the NOIZEUS corpus, including its structure.")
+                # ── Per-noise-type heatmap (full mode only) ───────────────────
+                if bench_mode == 'full':
+                    st.markdown("### PESQ by noise type — identify algorithm weak spots")
+                    st.caption("Mean PESQ per noise type averaged across all SNR levels. Red = low quality, green = high quality.")
+                    noise_types = sorted({r['noise'] for r in results})
+                    heat_data = {}
+                    for algo in cached_algorithms:
+                        lbl = algo['label']
+                        heat_data[lbl] = {}
+                        for noise in noise_types:
+                            vals = [
+                                r[lbl].get('pesq')
+                                for r in results
+                                if r['noise'] == noise and lbl in r
+                                   and isinstance(r[lbl], dict) and r[lbl].get('pesq') is not None
+                            ]
+                            heat_data[lbl][noise] = round(float(np.mean(vals)), 3) if vals else None
+                    heat_df = pd.DataFrame(heat_data).T
+                    heat_df.index.name = 'Algorithm'
+                    st.dataframe(
+                        heat_df.style.background_gradient(cmap='RdYlGn', axis=None, vmin=1.0, vmax=3.5),
+                        use_container_width=True
+                    )
+
+                # ── Boxplots ───────────────────────────────────────────────────
+                st.markdown("### Visual comparisons")
+                fig, axes = plt.subplots(1, len(metric_display), figsize=(7 * len(metric_display), 8))
+
+                if len(metric_display) == 1:
+                    axes = [axes]
+
+                for ax_idx, (metric_key, metric_label) in enumerate(metric_display.items()):
+                    valid_labels = [
+                        lbl for lbl in algo_labels
+                        if any(
+                            isinstance(r.get(lbl), dict) and r[lbl].get(metric_key) is not None
+                            for r in results
+                        )
+                    ]
+                    if not valid_labels:
+                        axes[ax_idx].set_visible(False)
+                        continue
+                    data_per_algo = [
+                        [r[lbl][metric_key] for r in results if isinstance(r.get(lbl), dict) and r[lbl].get(metric_key) is not None]
+                        for lbl in valid_labels
+                    ]
+                    bp = axes[ax_idx].boxplot(data_per_algo, labels=valid_labels, patch_artist=True)
+                    axes[ax_idx].set_title(metric_label)
+                    axes[ax_idx].grid(True, alpha=0.3)
+                    if metric_key == 'pesq':
+                        axes[ax_idx].set_ylim(0, 4.5)
+                        axes[ax_idx].set_ylabel('Score (0–4.5)')
+                    elif metric_key == 'stoi':
+                        axes[ax_idx].set_ylim(0, 1)
+                        axes[ax_idx].set_ylabel('Score (0–1)')
+                    else:
+                        axes[ax_idx].set_ylabel('dB')
+                    style_benchmark_axis(axes[ax_idx], valid_labels, family_lookup, bp)
+
+                add_family_legend(fig, algo_labels, family_lookup)
+                fig.subplots_adjust(bottom=0.42, top=0.82, wspace=0.3)
+                st.caption("Boxplots grouped and colour-coded by algorithm family.")
+                st.pyplot(fig)
+
+                # ── CSV export ─────────────────────────────────────────────────
+                export_rows = []
+                for r in results:
+                    base = {'Sample': r['Sample'], 'noise': r.get('noise', ''), 'snr': r.get('snr', '')}
+                    for lbl in algo_labels:
+                        if isinstance(r.get(lbl), dict):
+                            for metric in metrics_names:
+                                base[f"{lbl}_{metric}"] = r[lbl].get(metric, 'N/A')
+                    export_rows.append(base)
+                csv_data = pd.DataFrame(export_rows).to_csv(index=False)
+                fname_suffix = "full" if bench_mode == 'full' else f"{st.session_state.get('benchmark_noise', 'cond')}_{st.session_state.get('benchmark_snr', '')}"
+                st.download_button(
+                    label="Download benchmark CSV",
+                    data=csv_data,
+                    file_name=f"benchmark_{fname_suffix}.csv",
+                    mime="text/csv"
+                )
