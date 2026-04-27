@@ -1,0 +1,25 @@
+# Docs
+docs/
+
+# API keys and secrets
+.env
+.env.*
+*.env
+secrets.py
+secrets.json
+config/secrets.*
+api_keys.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
