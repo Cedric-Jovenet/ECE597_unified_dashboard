@@ -1,6 +1,9 @@
 # Docs
 docs/
 
+# Artifacts
+artifacts/
+
 # API keys and secrets
 .env
 .env.*
