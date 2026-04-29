@@ -1005,3 +1005,41 @@ with tab_benchmarks:
                     file_name=f"benchmark_{fname_suffix}.csv",
                     mime="text/csv"
                 )
+
+with tab_knowledge:
+    st.header("📚 Knowledge Base")
+    st.markdown("Use this page to review the main concepts, datasets, metrics, and classical algorithm families referenced throughout the project.")
+
+    if not knowledge_topics:
+        st.warning("No knowledge topics are currently registered.")
+    else:
+        topic_names = list(knowledge_topics.keys())
+        selected_topic = st.selectbox(
+            "Topic",
+            topic_names,
+            key="knowledge_topic_select"
+        )
+        topic = knowledge_topics[selected_topic]
+
+        st.subheader(selected_topic)
+        st.markdown(f"**Summary:** {topic['summary']}")
+        st.markdown(f"**Definition:** {topic['definition']}")
+
+        if topic.get('notes'):
+            st.markdown("### Notes")
+            st.markdown(topic['notes'])
+
+        if topic.get('references'):
+            st.markdown("### References")
+            for reference in topic['references']:
+                st.markdown(f"- {reference}")
+
+        if topic.get('resources'):
+            st.markdown("### Resources")
+            for resource in topic['resources']:
+                st.markdown(f"- {resource}")
+
+        with st.expander("Browse all topics"):
+            for topic_name, topic_meta in knowledge_topics.items():
+                st.markdown(f"**{topic_name}**")
+                st.write(topic_meta['summary'])

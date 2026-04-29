@@ -490,9 +490,19 @@ def get_knowledge_topics():
             'summary': "Primary dataset used for the current speech-enhancement benchmark.",
             'definition': "NOIZEUS is a speech corpus with noisy recordings across several real-world noise types and SNR conditions, with clean references.",
             'references': [
-                "Official dataset page: https://ecs.utdallas.edu/loizou/speech/noizeus/"
+                "Official dataset page: https://ecs.utdallas.edu/loizou/speech/noizeus/",
+                "Y. Hu and P. C. Loizou, \"Subjective evaluation and comparison of speech enhancement algorithms,\" Speech Communication, vol. 49, no. 7-8, pp. 588-601, 2007."
             ],
             'notes': "NOIZEUS fits the current project benchmark well because it provides matched clean references for objective scoring.",
+            'resources': []
+        },
+        "Speech Enhancement: Theory and Practice": {
+            'summary': "Core textbook reference used to frame the classical enhancement families implemented in the project.",
+            'definition': "Loizou's textbook is a standard reference for spectral subtraction, Wiener filtering, MMSE estimators, subspace methods, metrics, and benchmark practice in speech enhancement.",
+            'references': [
+                "P. C. Loizou, Speech Enhancement: Theory and Practice, 2nd ed., CRC Press, 2013."
+            ],
+            'notes': "This book is the main project-wide theoretical reference when describing the classical algorithm families and evaluation methodology.",
             'resources': []
         },
         "VoiceBank+DEMAND": {
