@@ -772,48 +772,56 @@ with tab_benchmarks:
 
             run_mode = st.radio(
                 "Benchmark scope",
-                ["Single condition", "Full dataset (all noise types × all SNR levels)"],
+                ["Single scenario (one noise type across all SNR levels)", "Full dataset (all noise types × all SNR levels)"],
                 horizontal=True,
                 key="bench_mode"
             )
 
-            if run_mode == "Single condition":
-                col_sel1, col_sel2 = st.columns(2)
-                with col_sel1:
-                    analysis_noise = st.selectbox("Noise type", available_analysis_noises, key="analysis_noise")
-                with col_sel2:
-                    analysis_snr = st.selectbox("Signal-to-noise ratio level", available_analysis_snrs, key="analysis_snr")
+            if run_mode == "Single scenario (one noise type across all SNR levels)":
+                analysis_noise = st.selectbox("Scenario (noise type)", available_analysis_noises, key="analysis_noise")
+                selected_scenario_conditions = [
+                    s for s in noizeus_samples if s['noise_name'] == analysis_noise
+                ]
+                selected_scenario_conditions = sorted(
+                    selected_scenario_conditions,
+                    key=lambda s: float(str(s['snr']).replace('dB', ''))
+                )
+                scenario_sample_count = sum(s['count'] for s in selected_scenario_conditions)
 
-                selected_analysis_sample = next(
-                    (s for s in noizeus_samples if s['noise_name'] == analysis_noise and s['snr'] == analysis_snr),
-                    None
+                st.caption(
+                    f"This scenario includes **{len(selected_scenario_conditions)} SNR levels** "
+                    f"with **{scenario_sample_count} utterances** in total."
                 )
 
-                if selected_analysis_sample and st.button("Run benchmark on this condition", key="run_analysis"):
-                    with st.spinner("Analyzing all samples in this condition..."):
+                if selected_scenario_conditions and st.button("Run benchmark on this scenario", key="run_analysis"):
+                    with st.spinner("Analyzing all samples in this scenario..."):
                         results = []
-                        for sample_idx in range(1, selected_analysis_sample['count'] + 1):
-                            y_noisy, y_clean, sr = load_noizeus_sample(selected_analysis_sample['noise_type'], sample_idx)
-                            if y_noisy is None or y_clean is None:
-                                continue
-                            sample_results = {'Sample': sample_idx, 'noise': analysis_noise, 'snr': analysis_snr}
-                            for algorithm in enhancement_algorithms:
-                                try:
-                                    y_enhanced = run_algorithm(algorithm, y_noisy, sr)
-                                    sample_results[algorithm['label']] = calculate_metrics(y_noisy, y_clean, y_enhanced, sr)
-                                except Exception as exc:
-                                    sample_results[algorithm['label']] = {'error': str(exc)}
-                            results.append(sample_results)
+                        for scenario_condition in selected_scenario_conditions:
+                            for sample_idx in range(1, scenario_condition['count'] + 1):
+                                y_noisy, y_clean, sr = load_noizeus_sample(scenario_condition['noise_type'], sample_idx)
+                                if y_noisy is None or y_clean is None:
+                                    continue
+                                sample_results = {
+                                    'Sample': sample_idx,
+                                    'noise': analysis_noise,
+                                    'snr': scenario_condition['snr']
+                                }
+                                for algorithm in enhancement_algorithms:
+                                    try:
+                                        y_enhanced = run_algorithm(algorithm, y_noisy, sr)
+                                        sample_results[algorithm['label']] = calculate_metrics(y_noisy, y_clean, y_enhanced, sr)
+                                    except Exception as exc:
+                                        sample_results[algorithm['label']] = {'error': str(exc)}
+                                results.append(sample_results)
 
                         st.session_state['benchmark_results'] = results
-                        st.session_state['benchmark_mode'] = 'single'
+                        st.session_state['benchmark_mode'] = 'scenario'
                         st.session_state['benchmark_noise'] = analysis_noise
-                        st.session_state['benchmark_snr'] = analysis_snr
                         st.session_state['benchmark_algorithms'] = enhancement_algorithms
                         st.success(f"Benchmark completed on {len(results)} samples")
 
                 elif 'benchmark_results' not in st.session_state:
-                    st.info("Select a NOIZEUS condition, then run the benchmark.")
+                    st.info("Select a NOIZEUS scenario, then run the benchmark.")
 
             else:
                 total_utterances = sum(s['count'] for s in noizeus_samples)
@@ -861,7 +869,7 @@ with tab_benchmarks:
             if 'benchmark_results' in st.session_state:
                 results = st.session_state['benchmark_results']
                 cached_algorithms = st.session_state['benchmark_algorithms']
-                bench_mode = st.session_state.get('benchmark_mode', 'single')
+                bench_mode = st.session_state.get('benchmark_mode', 'scenario')
 
                 algo_labels = [a['label'] for a in cached_algorithms]
                 family_lookup = {a['label']: a['family'] for a in cached_algorithms}
@@ -873,10 +881,13 @@ with tab_benchmarks:
                     'stoi': "STOI",
                 }
 
-                if bench_mode == 'single':
+                if bench_mode in ('single', 'scenario'):
                     cached_noise = st.session_state.get('benchmark_noise', '?')
-                    cached_snr = st.session_state.get('benchmark_snr', '?')
-                    st.caption(f"Results for **{cached_noise}** at **{cached_snr}** — switch to Full dataset or re-run to update.")
+                    snrs_covered = sorted({r['snr'] for r in results})
+                    st.caption(
+                        f"Scenario results for **{cached_noise}** across **{len(snrs_covered)} SNR levels** "
+                        f"({len(results)} utterances)."
+                    )
                 else:
                     noises_covered = sorted({r['noise'] for r in results})
                     snrs_covered = sorted({r['snr'] for r in results})
@@ -921,7 +932,7 @@ with tab_benchmarks:
                         "Higher is better. Rank 1 is the best overall algorithm."
                     )
 
-                st.markdown("### Summary table" if bench_mode == 'single' else "### Per-algorithm aggregate (all conditions)")
+                st.markdown("### Summary table" if bench_mode in ('single', 'scenario') else "### Per-algorithm aggregate (all conditions)")
                 st.dataframe(agg_df, use_container_width=True)
 
                 # ── Per-noise-type heatmap (full mode only) ───────────────────

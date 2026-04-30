@@ -45,10 +45,11 @@ streamlit run app.py
 
 Run the offline benchmark helper with:
 ```bash
-python -m src.evaluation.noizeus_benchmark --noise babble --snr 5dB --output-dir artifacts
+python -m src.evaluation.noizeus_benchmark --noise babble --output-dir artifacts
 ```
 
 This command writes raw and summary CSV files that can be reused in the written report.
+Use `--snr 5dB` only when you want to drill down to a single noise-condition slice.
 
 ## Datasets
 
